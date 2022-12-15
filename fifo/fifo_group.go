@@ -283,3 +283,55 @@ func groupFromJSON(b []byte) (*parse.Result, error) {
 
 	return parse.NewResult(g, msg.Scope)
 }
+
+// ToImmutable creates ImmutableGroup from existing Group.
+// If a Group has a modifier that is another Group it will also become immutable.
+// Moreover, if the aggregateErrors settings match between the two groups the other group's modifiers are inlined.
+func (g *Group) ToImmutable() *ImmutableGroup {
+	g.reqmu.Lock()
+	defer g.reqmu.Unlock()
+	g.resmu.Lock()
+	defer g.resmu.Unlock()
+
+	var reqmods []martian.RequestModifier
+	for _, m := range g.reqmods {
+		if mm, ok := m.(*Group); ok {
+			if im := mm.ToImmutable(); g.aggregateErrors == im.aggregateErrors {
+				reqmods = append(reqmods, im.reqmods...)
+			} else {
+				reqmods = append(reqmods, im)
+			}
+		} else {
+			reqmods = append(reqmods, m)
+		}
+	}
+
+	var resmods []martian.ResponseModifier
+	for _, m := range g.resmods {
+		if mm, ok := m.(*Group); ok {
+			if im := mm.ToImmutable(); g.aggregateErrors == im.aggregateErrors {
+				resmods = append(resmods, im.resmods...)
+			} else {
+				resmods = append(resmods, im)
+			}
+		} else {
+			resmods = append(resmods, m)
+		}
+	}
+
+	return &ImmutableGroup{
+		group{
+			reqmods:         reqmods,
+			resmods:         resmods,
+			aggregateErrors: g.aggregateErrors,
+		},
+	}
+}
+
+// ImmutableGroup is a martian.RequestResponseModifier that maintains lists of
+// request and response modifiers executed on a first-in, first-out basis.
+// ImmutableGroup can be constructed only from a Group.
+// It cannot be modified.
+type ImmutableGroup struct {
+	group
+}
