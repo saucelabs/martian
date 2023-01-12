@@ -691,13 +691,19 @@ type peekedConn struct {
 // be read again.
 func (c *peekedConn) Read(buf []byte) (int, error) { return c.r.Read(buf) }
 
+const RoundTripDurationKey = "round-trip-duration"
+
 func (p *Proxy) roundTrip(ctx *Context, req *http.Request) (*http.Response, error) {
 	if ctx.SkippingRoundTrip() {
 		log.Debugf("martian: skipping round trip")
 		return proxyutil.NewResponse(200, nil, req), nil
 	}
 
-	return p.roundTripper.RoundTrip(req)
+	t0 := time.Now()
+	res, err := p.roundTripper.RoundTrip(req)
+	ctx.Set(RoundTripDurationKey, time.Now().Sub(t0))
+
+	return res, err
 }
 
 func (p *Proxy) warning(h http.Header, err error) {

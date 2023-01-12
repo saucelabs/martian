@@ -29,11 +29,33 @@ import (
 	"github.com/google/martian/v3/parse"
 )
 
+type LoggerMode string
+
+const (
+	UrlLogMode     LoggerMode = "url"
+	HeaderLogMode  LoggerMode = "header"
+	BodyLogMode    LoggerMode = "body"
+	ErrOnlyLogMode LoggerMode = "error"
+)
+
+func (m LoggerMode) String() string {
+	return string(m)
+}
+
+func (m LoggerMode) IsValid() bool {
+	switch m {
+	case UrlLogMode, HeaderLogMode, BodyLogMode, ErrOnlyLogMode:
+		return true
+	default:
+		return false
+	}
+}
+
 // Logger is a modifier that logs requests and responses.
 type Logger struct {
-	log         func(line string)
-	headersOnly bool
-	decode      bool
+	log    func(line string)
+	mode   LoggerMode
+	decode bool
 }
 
 type loggerJSON struct {
@@ -50,15 +72,24 @@ func init() {
 // logging the body. Log function defaults to martian.Infof.
 func NewLogger() *Logger {
 	return &Logger{
+		mode: HeaderLogMode,
 		log: func(line string) {
 			log.Infof(line)
 		},
 	}
 }
 
+func (l *Logger) SetMode(mode LoggerMode) {
+	l.mode = mode
+}
+
 // SetHeadersOnly sets whether to log the request/response body in the log.
 func (l *Logger) SetHeadersOnly(headersOnly bool) {
-	l.headersOnly = headersOnly
+	if headersOnly {
+		l.mode = HeaderLogMode
+	} else {
+		l.mode = BodyLogMode
+	}
 }
 
 // SetDecode sets whether to decode the request/response body in the log.
@@ -69,6 +100,62 @@ func (l *Logger) SetDecode(decode bool) {
 // SetLogFunc sets the logging function for the logger.
 func (l *Logger) SetLogFunc(logFunc func(line string)) {
 	l.log = logFunc
+}
+
+func (l *Logger) logUrl(b *bytes.Buffer, url string) {
+	fmt.Fprintln(b, "")
+	fmt.Fprintln(b, strings.Repeat("-", 80))
+	fmt.Fprintln(b, url)
+	fmt.Fprintln(b, strings.Repeat("-", 80))
+}
+
+func (l *Logger) logEnd(b *bytes.Buffer) {
+	fmt.Fprintln(b, "")
+	fmt.Fprintln(b, strings.Repeat("-", 80))
+}
+
+func (l *Logger) logStatus(b *bytes.Buffer, status string) {
+	fmt.Fprintln(b, "status:", status)
+}
+
+func (l *Logger) logRequest(b *bytes.Buffer, mv *messageview.MessageView, req *http.Request) error {
+	if err := mv.SnapshotRequest(req); err != nil {
+		return err
+	}
+
+	var opts []messageview.Option
+	if l.decode {
+		opts = append(opts, messageview.Decode())
+	}
+
+	r, err := mv.Reader(opts...)
+	if err != nil {
+		return err
+	}
+
+	io.Copy(b, r)
+
+	return nil
+}
+
+func (l *Logger) logResponse(b *bytes.Buffer, mv *messageview.MessageView, res *http.Response) error {
+	if err := mv.SnapshotResponse(res); err != nil {
+		return err
+	}
+
+	var opts []messageview.Option
+	if l.decode {
+		opts = append(opts, messageview.Decode())
+	}
+
+	r, err := mv.Reader(opts...)
+	if err != nil {
+		return err
+	}
+
+	io.Copy(b, r)
+
+	return nil
 }
 
 // ModifyRequest logs the request, optionally including the body.
@@ -89,38 +176,24 @@ func (l *Logger) ModifyRequest(req *http.Request) error {
 	if ctx.SkippingLogging() {
 		return nil
 	}
+	if l.mode == ErrOnlyLogMode {
+		return nil
+	}
 
 	b := &bytes.Buffer{}
+	defer func() { l.log(b.String()) }()
+	defer l.logEnd(b)
 
-	fmt.Fprintln(b, "")
-	fmt.Fprintln(b, strings.Repeat("-", 80))
-	fmt.Fprintf(b, "Request to %s\n", req.URL)
-	fmt.Fprintln(b, strings.Repeat("-", 80))
+	l.logUrl(b, fmt.Sprintf("Request to %s", req.URL))
+
+	if l.mode == UrlLogMode {
+		return nil
+	}
 
 	mv := messageview.New()
-	mv.SkipBody(l.headersOnly)
-	if err := mv.SnapshotRequest(req); err != nil {
-		return err
-	}
+	mv.SkipBody(l.mode != BodyLogMode)
 
-	var opts []messageview.Option
-	if l.decode {
-		opts = append(opts, messageview.Decode())
-	}
-
-	r, err := mv.Reader(opts...)
-	if err != nil {
-		return err
-	}
-
-	io.Copy(b, r)
-
-	fmt.Fprintln(b, "")
-	fmt.Fprintln(b, strings.Repeat("-", 80))
-
-	l.log(b.String())
-
-	return nil
+	return l.logRequest(b, mv, req)
 }
 
 // ModifyResponse logs the response, optionally including the body.
@@ -141,36 +214,40 @@ func (l *Logger) ModifyResponse(res *http.Response) error {
 		return nil
 	}
 
+	if l.mode == ErrOnlyLogMode && res.StatusCode < 400 {
+		return nil
+	}
+
 	b := &bytes.Buffer{}
-	fmt.Fprintln(b, "")
-	fmt.Fprintln(b, strings.Repeat("-", 80))
-	fmt.Fprintf(b, "Response from %s\n", res.Request.URL)
-	fmt.Fprintln(b, strings.Repeat("-", 80))
+	defer func() { l.log(b.String()) }()
+	defer l.logEnd(b)
 
 	mv := messageview.New()
-	mv.SkipBody(l.headersOnly)
-	if err := mv.SnapshotResponse(res); err != nil {
-		return err
+	mv.SkipBody(l.mode != BodyLogMode)
+
+	if l.mode == ErrOnlyLogMode && res.StatusCode >= 400 {
+		// Log corresponding request.
+		l.logUrl(b, fmt.Sprintf("Request to %s", res.Request.URL))
+		if err := l.logRequest(b, mv, res.Request); err != nil {
+			return err
+		}
+		l.logEnd(b)
 	}
 
-	var opts []messageview.Option
-	if l.decode {
-		opts = append(opts, messageview.Decode())
+	var url string
+	if d, ok := ctx.Get(martian.RoundTripDurationKey); ok {
+		url = fmt.Sprintf("Response from %s, round trip took %s", res.Request.URL, d)
+	} else {
+		url = fmt.Sprintf("Response from %s", res.Request.URL)
+	}
+	l.logUrl(b, url)
+
+	if l.mode == UrlLogMode {
+		l.logStatus(b, res.Status)
+		return nil
 	}
 
-	r, err := mv.Reader(opts...)
-	if err != nil {
-		return err
-	}
-
-	io.Copy(b, r)
-
-	fmt.Fprintln(b, "")
-	fmt.Fprintln(b, strings.Repeat("-", 80))
-
-	l.log(b.String())
-
-	return nil
+	return l.logResponse(b, mv, res)
 }
 
 // loggerFromJSON builds a logger from JSON.
