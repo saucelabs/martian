@@ -813,8 +813,16 @@ func (p *Proxy) connectHTTP(req *http.Request, proxyURL *url.URL) (*http.Respons
 		Host:   req.Host,
 		Header: make(http.Header),
 	}
-	if proxyURL.User != nil {
-		connReq.Header.Add("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(proxyURL.User.String())))
+	if u := proxyURL.User; u != nil {
+		// UserInfo string encodes the username and password which we want to avoid.
+		// See SC-4366 for details.
+		var enc string
+		if p, ok := u.Password(); ok {
+			enc = fmt.Sprintf("%s:%s", u.Username(), p)
+		} else {
+			enc = u.Username()
+		}
+		connReq.Header.Add("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(enc)))
 	}
 	connReq.Write(pbw)
 
