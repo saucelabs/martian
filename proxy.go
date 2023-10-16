@@ -368,7 +368,7 @@ func (p *Proxy) readHeaderTimeout() time.Duration {
 	return p.ReadTimeout
 }
 
-func (p *Proxy) readRequest(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) (req *http.Request, err error) {
+func (p *Proxy) readRequest(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) (*http.Request, error) {
 	// Wait for the connection to become readable before trying to
 	// read the next request. This prevents a ReadHeaderTimeout or
 	// ReadTimeout from starting until the first bytes of the next request
@@ -393,25 +393,12 @@ func (p *Proxy) readRequest(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) 
 		log.Errorf("martian: can't set read header deadline: %v", deadlineErr)
 	}
 
-	req, err = http.ReadRequest(brw.Reader)
+	req, err := http.ReadRequest(brw.Reader)
 	if err != nil {
-		if isClosedConnError(err) {
-			log.Debugf("martian: connection closed prematurely: %v", err)
-		} else {
-			log.Errorf("martian: failed to read request: %v", err)
-		}
-		if cw, ok := asCloseWriter(conn); ok {
-			cw.CloseWrite()
-		}
-	} else {
-		select {
-		case <-p.closing:
-			err = errClose
-		default:
-		}
-
-		req = req.WithContext(ctx.addToContext(req.Context()))
+		return nil, err
 	}
+
+	req = req.WithContext(ctx.addToContext(req.Context()))
 
 	// Adjust the read deadline if necessary.
 	if !hdrDeadline.Equal(wholeReqDeadline) {
@@ -420,7 +407,7 @@ func (p *Proxy) readRequest(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) 
 		}
 	}
 
-	return
+	return req, nil
 }
 
 var copyBufPool = sync.Pool{
@@ -630,9 +617,18 @@ func (p *Proxy) handle(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) error
 
 	req, err := p.readRequest(ctx, conn, brw)
 	if err != nil {
+		if isClosedConnError(err) {
+			log.Debugf("martian: connection closed prematurely: %v", err)
+		} else {
+			log.Errorf("martian: failed to read request: %v", err)
+		}
 		return errClose
 	}
 	defer req.Body.Close()
+
+	if p.Closing() {
+		return errClose
+	}
 
 	if tsconn, ok := conn.(*trafficshape.Conn); ok {
 		wrconn := tsconn.GetWrappedConn()
