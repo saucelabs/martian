@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/martian/v3/log"
@@ -58,11 +59,10 @@ func isClosedConnError(err error) bool {
 		return false
 	}
 
-	// TODO: remove this string search and be more like the Windows
-	// case below. That might involve modifying the standard library
-	// to return better error types.
-	str := err.Error()
-	if strings.Contains(str, "use of closed network connection") {
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 
@@ -71,8 +71,9 @@ func isClosedConnError(err error) bool {
 	// Windows-specific stuff. Fix that and move this, once we
 	// have a way to bundle this into std's net/http somehow.
 	if runtime.GOOS == "windows" {
-		if oe, ok := err.(*net.OpError); ok && oe.Op == "read" {
-			if se, ok := oe.Err.(*os.SyscallError); ok && se.Syscall == "wsarecv" {
+		var oe *net.OpError
+		if errors.As(err, &oe); oe.Op == "read" {
+			if se, ok := oe.Err.(*os.SyscallError); ok && se.Syscall == "wsarecv" { //nolint:errorlint // handle syscall.Errno
 				const WSAECONNABORTED = 10053
 				const WSAECONNRESET = 10054
 				if n := errno(se.Err); n == WSAECONNRESET || n == WSAECONNABORTED {
@@ -81,7 +82,8 @@ func isClosedConnError(err error) bool {
 			}
 		}
 	}
-	return false
+
+	return strings.Contains(err.Error(), "use of closed network connection")
 }
 
 // isCloseable reports whether err is an error that indicates the client connection should be closed.
