@@ -395,7 +395,7 @@ func (p *Proxy) readRequest(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) 
 
 	req, err = http.ReadRequest(brw.Reader)
 	if err != nil {
-		if isCloseable(err) {
+		if isClosedConnError(err) {
 			log.Debugf("martian: connection closed prematurely: %v", err)
 		} else {
 			log.Errorf("martian: failed to read request: %v", err)
