@@ -422,7 +422,7 @@ func copySync(dir string, w io.Writer, r io.Reader, donec chan<- bool) {
 	buf := *bufp
 	defer copyBufPool.Put(bufp)
 
-	if _, err := io.CopyBuffer(w, r, buf); err != nil && err != io.EOF {
+	if _, err := io.CopyBuffer(w, r, buf); err != nil && !isClosedConnError(err) {
 		log.Errorf("martian: failed to copy %s CONNECT tunnel: %v", dir, err)
 	}
 	if cw, ok := asCloseWriter(w); ok {
